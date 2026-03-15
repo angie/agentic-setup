@@ -1,5 +1,5 @@
 # Vendor content is fetched by scripts/sync, never committed
-vendor/*
+vendor
 !vendor/.keep
 
 # macOS

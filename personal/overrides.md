@@ -13,7 +13,7 @@ All commit messages, PR descriptions, code comments, and written communication m
 
 **Never mention test counts or coverage percentages in commit messages.**
 
-This means no phrases like "X tests passing", "added 12 tests", "100% coverage", "all tests green", or any other reference to test quantities. Commit messages describe *what changed and why*, not testing metrics.
+This means no phrases like "X tests passing", "added 12 tests", "100% coverage", "all tests green", or any other reference to test quantities. Commit messages describe _what changed and why_, not testing metrics.
 
 ## Project Context
 
@@ -31,7 +31,12 @@ This means no phrases like "X tests passing", "added 12 tests", "100% coverage",
 Prefer `agent-browser` for web automation. If not installed, fall back to WebFetch, curl, or MCP browser tools.
 
 `agent-browser` core workflow:
+
 1. `agent-browser open <url>`
 2. `agent-browser snapshot -i` — get interactive elements with refs
 3. `agent-browser click @e1` / `fill @e2 "text"` — interact using refs
 4. Re-snapshot after page changes
+
+## Documentation
+
+Always use Context7 when I need library/API documentation, code generation, setup or configuration steps without me having to explicitly ask.

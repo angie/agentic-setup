@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+# scripts/sync
+#
+# Pulls latest content from upstreams declared in manifest.yml into vendor/.
+# Shows a diff of what changed. Updates vendor.lock.yml.
+#
+# Usage:
+#   scripts/sync                    # interactive — shows diffs, asks to proceed
+#   scripts/sync --yes              # auto-accept all changes
+#   scripts/sync --dry-run          # check for updates without downloading
+#   scripts/sync --source citypaul  # sync a specific upstream only
+#   scripts/sync --source mintuz
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+VENDOR_DIR="$REPO_DIR/vendor"
+LOCK_FILE="$REPO_DIR/vendor.lock.yml"
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+DRY_RUN=false
+AUTO_YES=false
+ONLY_SOURCE=""
+
+for arg in "$@"; do
+  case $arg in
+    --dry-run)   DRY_RUN=true ;;
+    --yes|-y)    AUTO_YES=true ;;
+    --source=*)  ONLY_SOURCE="${arg#*=}" ;;
+    --source)    shift; ONLY_SOURCE="$1" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+log()  { echo -e "$1"; }
+ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
+warn() { echo -e "  ${YELLOW}↑${NC} $1"; }
+info() { echo -e "  ${BLUE}→${NC} $1"; }
+err()  { echo -e "  ${RED}✗${NC} $1" >&2; }
+
+require_gh() {
+  if ! command -v gh &>/dev/null; then
+    err "gh CLI not found. Install from https://cli.github.com"
+    exit 1
+  fi
+}
+
+locked_commit() {
+  local source="$1"
+  grep -A5 "^${source}:" "$LOCK_FILE" 2>/dev/null | grep "commit:" | awk '{print $2}' | tr -d "'" | grep -v "^null$" || echo ""
+}
+
+update_lock() {
+  local source="$1"
+  local commit="$2"
+  local date
+  date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  python3 - "$LOCK_FILE" "$source" "$commit" "$date" <<'PYEOF'
+import sys, re
+
+lock_file, source, commit, date = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+with open(lock_file, 'r') as f:
+    content = f.read()
+
+content = re.sub(
+    rf'({re.escape(source)}:.*?last_synced:)\s*\S+',
+    rf'\1 {date}',
+    content, flags=re.DOTALL
+)
+content = re.sub(
+    rf'({re.escape(source)}:.*?commit:)\s*\S+',
+    rf'\1 {commit[:7]}',
+    content, flags=re.DOTALL
+)
+
+with open(lock_file, 'w') as f:
+    f.write(content)
+PYEOF
+}
+
+download_file() {
+  local repo="$1" branch="$2" remote_path="$3" local_path="$4"
+  mkdir -p "$(dirname "$local_path")"
+  curl -fsSL "https://raw.githubusercontent.com/${repo}/${branch}/${remote_path}" -o "$local_path"
+}
+
+# Recursively download a directory from GitHub into a local dir
+download_dir() {
+  local repo="$1"
+  local branch="$2"
+  local remote_path="$3"
+  local local_dir="$4"
+
+  local entries
+  entries=$(gh api "repos/${repo}/contents/${remote_path}?ref=${branch}" 2>/dev/null) || {
+    err "Failed to list ${remote_path} in ${repo}"
+    return 1
+  }
+
+  echo "$entries" | python3 -c "
+import sys, json
+entries = json.load(sys.stdin)
+for e in entries:
+    print(e['type'], e['path'], e.get('download_url') or '')
+" | while read -r type path download_url; do
+    local rel_path="${path#${remote_path}/}"
+    local dest="$local_dir/$rel_path"
+
+    if [[ "$type" == "file" ]]; then
+      mkdir -p "$(dirname "$dest")"
+      curl -fsSL "$download_url" -o "$dest" 2>/dev/null
+    elif [[ "$type" == "dir" ]]; then
+      download_dir "$repo" "$branch" "$path" "$local_dir/$(basename "$path")"
+    fi
+  done
+}
+
+show_changes() {
+  local old_dir="$1"
+  local new_dir="$2"
+
+  if [[ ! -d "$old_dir" ]]; then
+    echo "(new — no previous version)"
+    return 0
+  fi
+
+  local diff_out
+  diff_out=$(diff -rq --exclude=".DS_Store" "$old_dir" "$new_dir" 2>/dev/null || true)
+
+  if [[ -z "$diff_out" ]]; then
+    return 1
+  fi
+
+  echo "$diff_out" | head -20
+  local total
+  total=$(echo "$diff_out" | wc -l | tr -d ' ')
+  [[ "$total" -gt 20 ]] && echo "  ... and $((total - 20)) more"
+  return 0
+}
+
+confirm_and_apply() {
+  local source="$1"
+  local tmp_dest="$2"
+  local dest="$3"
+  local latest_commit="$4"
+
+  log ""
+  if ! show_changes "$dest" "$tmp_dest"; then
+    ok "No content changes (only metadata changed)"
+    update_lock "$source" "$latest_commit"
+    return 0
+  fi
+
+  log ""
+
+  if [[ "$AUTO_YES" != "true" ]]; then
+    read -r -p "  Apply these changes? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { info "Skipped."; return 0; }
+  fi
+
+  rm -rf "$dest"
+  cp -r "$tmp_dest" "$dest"
+  update_lock "$source" "$latest_commit"
+  ok "Updated to ${latest_commit:0:7}"
+}
+
+# ---------------------------------------------------------------------------
+# Sync citypaul/.dotfiles
+# ---------------------------------------------------------------------------
+
+sync_citypaul() {
+  local REPO="citypaul/.dotfiles"
+  local BRANCH="main"
+  local BASE_PATH="claude/.claude"
+  local DEST="$VENDOR_DIR/citypaul"
+
+  log ""
+  log "${BOLD}citypaul/.dotfiles${NC}"
+
+  local latest_commit
+  latest_commit=$(gh api "repos/${REPO}/commits?path=${BASE_PATH}&sa=${BRANCH}&per_page=1" \
+    --jq '.[0].sha' 2>/dev/null) || {
+    err "Could not fetch latest commit from ${REPO}"
+    return 1
+  }
+  local latest_short="${latest_commit:0:7}"
+  local locked
+  locked=$(locked_commit "citypaul")
+
+  if [[ "$locked" == "$latest_short" && -d "$DEST" ]]; then
+    ok "Up to date (${latest_short})"
+    return 0
+  fi
+
+  warn "Update available: ${locked:-never synced} → ${latest_short}"
+  [[ "$DRY_RUN" == "true" ]] && return 0
+
+  local TMP
+  TMP=$(mktemp -d)
+  trap "rm -rf '$TMP'" RETURN
+
+  info "Downloading..."
+
+  download_file "$REPO" "$BRANCH" "${BASE_PATH}/CLAUDE.md" "$TMP/CLAUDE.md"
+  download_dir  "$REPO" "$BRANCH" "${BASE_PATH}/skills"    "$TMP/skills"
+  download_dir  "$REPO" "$BRANCH" "${BASE_PATH}/commands"  "$TMP/commands"
+  download_dir  "$REPO" "$BRANCH" "${BASE_PATH}/agents"    "$TMP/agents"
+
+  confirm_and_apply "citypaul" "$TMP" "$DEST" "$latest_commit"
+}
+
+# ---------------------------------------------------------------------------
+# Sync mintuz/claude-plugins
+# ---------------------------------------------------------------------------
+
+sync_mintuz() {
+  local REPO="mintuz/claude-plugins"
+  local BRANCH="main"
+  local DEST="$VENDOR_DIR/mintuz"
+
+  # Skills to exclude (from manifest opt-out)
+  local -a OPT_OUT=(gps-method)
+
+  # All plugin categories that contain skills/commands/agents
+  local -a CATEGORIES=(core web app life product-management typescript system-design)
+
+  log ""
+  log "${BOLD}mintuz/claude-plugins${NC}"
+
+  local latest_commit
+  latest_commit=$(gh api "repos/${REPO}/commits?sha=${BRANCH}&per_page=1" \
+    --jq '.[0].sha' 2>/dev/null) || {
+    err "Could not fetch latest commit from ${REPO}"
+    return 1
+  }
+  local latest_short="${latest_commit:0:7}"
+  local locked
+  locked=$(locked_commit "mintuz")
+
+  if [[ "$locked" == "$latest_short" && -d "$DEST" ]]; then
+    ok "Up to date (${latest_short})"
+    return 0
+  fi
+
+  warn "Update available: ${locked:-never synced} → ${latest_short}"
+  [[ "$DRY_RUN" == "true" ]] && return 0
+
+  local TMP
+  TMP=$(mktemp -d)
+  trap "rm -rf '$TMP'" RETURN
+  mkdir -p "$TMP/skills" "$TMP/commands" "$TMP/agents"
+
+  info "Downloading..."
+
+  for category in "${CATEGORIES[@]}"; do
+    local base_path="plugins/${category}"
+
+    # --- Skills ---
+    local skills_url="repos/${REPO}/contents/${base_path}/skills?ref=${BRANCH}"
+    local skills_entries
+    skills_entries=$(gh api "$skills_url" 2>/dev/null) || continue
+
+    # Detect whether this category is a "flat" skill (SKILL.md lives directly
+    # in skills/) or "nested" (skills/ contains subdirectories, one per skill).
+    local is_flat
+    is_flat=$(echo "$skills_entries" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if isinstance(d, list):
+    print('yes' if any(f.get('name') == 'SKILL.md' for f in d) else 'no')
+else:
+    print('no')
+" 2>/dev/null || echo "no")
+
+    if [[ "$is_flat" == "yes" ]]; then
+      # The category itself is the skill (e.g. typescript → skill named "typescript")
+      local opted_out=false
+      for o in "${OPT_OUT[@]}"; do [[ "$category" == "$o" ]] && opted_out=true && break; done
+      [[ "$opted_out" == "false" ]] && download_dir "$REPO" "$BRANCH" "${base_path}/skills" "$TMP/skills/${category}"
+    else
+      # Each subdirectory is a distinct skill
+      local skill_names
+      skill_names=$(echo "$skills_entries" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if isinstance(d, list):
+    for f in d:
+        if f.get('type') == 'dir':
+            print(f['name'])
+" 2>/dev/null)
+
+      while IFS= read -r skill_name; do
+        [[ -z "$skill_name" ]] && continue
+        local opted_out=false
+        for o in "${OPT_OUT[@]}"; do [[ "$skill_name" == "$o" ]] && opted_out=true && break; done
+        [[ "$opted_out" == "false" ]] && \
+          download_dir "$REPO" "$BRANCH" "${base_path}/skills/${skill_name}" "$TMP/skills/${skill_name}"
+      done <<< "$skill_names"
+    fi
+
+    # --- Commands ---
+    local cmd_entries
+    cmd_entries=$(gh api "repos/${REPO}/contents/${base_path}/commands?ref=${BRANCH}" 2>/dev/null) || true
+    if [[ -n "$cmd_entries" ]]; then
+      while IFS=$'\t' read -r name url; do
+        [[ -z "$name" || -z "$url" ]] && continue
+        curl -fsSL "$url" -o "$TMP/commands/$name" 2>/dev/null
+      done < <(echo "$cmd_entries" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if isinstance(d, list):
+    for f in d:
+        if f.get('type') == 'file' and f.get('download_url'):
+            print(f['name'] + '\t' + f['download_url'])
+")
+    fi
+
+    # --- Agents ---
+    local agent_entries
+    agent_entries=$(gh api "repos/${REPO}/contents/${base_path}/agents?ref=${BRANCH}" 2>/dev/null) || true
+    if [[ -n "$agent_entries" ]]; then
+      while IFS=$'\t' read -r name url; do
+        [[ -z "$name" || -z "$url" ]] && continue
+        curl -fsSL "$url" -o "$TMP/agents/$name" 2>/dev/null
+      done < <(echo "$agent_entries" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if isinstance(d, list):
+    for f in d:
+        if f.get('type') == 'file' and f.get('download_url'):
+            print(f['name'] + '\t' + f['download_url'])
+")
+    fi
+  done
+
+  confirm_and_apply "mintuz" "$TMP" "$DEST" "$latest_commit"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+require_gh
+
+log "${BOLD}agentic-setup sync${NC}"
+[[ "$DRY_RUN" == "true" ]] && log "(dry run)"
+
+if [[ -z "$ONLY_SOURCE" || "$ONLY_SOURCE" == "citypaul" ]]; then sync_citypaul; fi
+if [[ -z "$ONLY_SOURCE" || "$ONLY_SOURCE" == "mintuz" ]];   then sync_mintuz;   fi
+
+log ""
+log "${BOLD}Done.${NC} Run ${BLUE}scripts/install${NC} to deploy to ~/.claude"

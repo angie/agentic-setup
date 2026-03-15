@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# scripts/install
+#
+# Deploys vendor + personal layers to ~/.claude and ~/.config/opencode.
+# Safe to re-run. Never touches private paths declared in manifest.yml.
+#
+# Install priority (last writer wins):
+#   mintuz → citypaul → personal
+# So citypaul wins over mintuz on skill name collisions, and personal
+# wins over everything.
+#
+# Usage:
+#   scripts/install               # install everything
+#   scripts/install --claude      # Claude Code only
+#   scripts/install --opencode    # OpenCode only
+#   scripts/install --dry-run     # show what would happen
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+VENDOR_DIR="$REPO_DIR/vendor"
+PERSONAL_DIR="$REPO_DIR/personal"
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+DRY_RUN=false
+DO_CLAUDE=true
+DO_OPENCODE=true
+
+for arg in "$@"; do
+  case $arg in
+    --dry-run)   DRY_RUN=true ;;
+    --claude)    DO_OPENCODE=false ;;
+    --opencode)  DO_CLAUDE=false ;;
+  esac
+done
+
+ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
+info() { echo -e "  ${BLUE}→${NC} $1"; }
+dry()  { echo -e "  [dry] $1"; }
+
+do_cp() {
+  local src="$1" dest="$2"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    dry "cp $src → $dest"
+  else
+    mkdir -p "$(dirname "$dest")"
+    cp -r "$src" "$dest"
+    ok "$dest"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Vendor check
+# ---------------------------------------------------------------------------
+
+check_vendor() {
+  local missing=()
+  [[ ! -d "$VENDOR_DIR/citypaul" ]] && missing+=("citypaul")
+  [[ ! -d "$VENDOR_DIR/mintuz" ]]   && missing+=("mintuz")
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo ""
+    echo "  Missing vendor dirs: ${missing[*]}"
+    echo "  Run: scripts/sync"
+    echo ""
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Generic helpers: install skills/commands/agents from a vendor dir
+# ---------------------------------------------------------------------------
+
+install_vendor_skills() {
+  local vendor="$1"
+  local src="$VENDOR_DIR/$vendor/skills"
+  [[ -d "$src" ]] || return 0
+
+  for skill_dir in "$src"/*/; do
+    [[ -d "$skill_dir" ]] || continue
+    local name
+    name=$(basename "$skill_dir")
+    do_cp "$skill_dir" "$CLAUDE_DIR/skills/$name"
+  done
+}
+
+install_vendor_commands() {
+  local vendor="$1"
+  local src="$VENDOR_DIR/$vendor/commands"
+  [[ -d "$src" ]] || return 0
+
+  for cmd in "$src"/*.md; do
+    [[ -f "$cmd" ]] || continue
+    local name
+    name=$(basename "$cmd")
+    do_cp "$cmd" "$CLAUDE_DIR/commands/$name"
+  done
+}
+
+install_vendor_agents() {
+  local vendor="$1"
+  local src="$VENDOR_DIR/$vendor/agents"
+  [[ -d "$src" ]] || return 0
+
+  for agent in "$src"/*.md; do
+    [[ -f "$agent" ]] || continue
+    do_cp "$agent" "$CLAUDE_DIR/agents/$(basename "$agent")"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Claude Code installation
+# ---------------------------------------------------------------------------
+
+install_claude() {
+  echo ""
+  echo -e "${BOLD}Claude Code${NC} (~/.claude)"
+
+  CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR/skills" "$CLAUDE_DIR/commands" "$CLAUDE_DIR/agents"
+
+  # CLAUDE.md — citypaul base + personal overrides appended
+  local assembled
+  assembled=$(mktemp)
+  cat "$VENDOR_DIR/citypaul/CLAUDE.md" "$PERSONAL_DIR/overrides.md" > "$assembled"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    dry "cat vendor/citypaul/CLAUDE.md + personal/overrides.md → ~/.claude/CLAUDE.md"
+  else
+    cp "$assembled" "$CLAUDE_DIR/CLAUDE.md"
+    ok "~/.claude/CLAUDE.md (upstream + personal overrides)"
+  fi
+  rm -f "$assembled"
+
+  # settings.json — personal only
+  do_cp "$PERSONAL_DIR/settings.json" "$CLAUDE_DIR/settings.json"
+
+  # Skills — mintuz first (lower priority), citypaul second, personal last (wins)
+  install_vendor_skills   "mintuz"
+  install_vendor_skills   "citypaul"
+  for skill_dir in "$PERSONAL_DIR/skills"/*/; do
+    [[ -d "$skill_dir" ]] || continue
+    local name
+    name=$(basename "$skill_dir")
+    do_cp "$skill_dir" "$CLAUDE_DIR/skills/$name"
+  done
+
+  # Commands — mintuz first, citypaul second, personal last (wins)
+  install_vendor_commands "mintuz"
+  install_vendor_commands "citypaul"
+  for cmd in "$PERSONAL_DIR/commands"/*.md; do
+    [[ -f "$cmd" ]] || continue
+    local name
+    name=$(basename "$cmd")
+    do_cp "$cmd" "$CLAUDE_DIR/commands/$name"
+  done
+
+  # Agents — mintuz first, citypaul second (no personal agents currently)
+  install_vendor_agents "mintuz"
+  install_vendor_agents "citypaul"
+}
+
+# ---------------------------------------------------------------------------
+# OpenCode installation
+# ---------------------------------------------------------------------------
+
+strip_claude_frontmatter() {
+  local file="$1"
+  python3 - "$file" <<'PYEOF'
+import sys, re
+
+with open(sys.argv[1], 'r') as f:
+    content = f.read()
+
+fm_match = re.match(r'^---\n(.*?)\n---\n', content, re.DOTALL)
+if not fm_match:
+    print(content)
+    sys.exit(0)
+
+fm_body = fm_match.group(1)
+rest = content[fm_match.end():]
+
+safe_lines = [line for line in fm_body.splitlines() if line.split(':')[0].strip() in ('description',)]
+
+if safe_lines:
+    print('---')
+    print('\n'.join(safe_lines))
+    print('---')
+print(rest, end='')
+PYEOF
+}
+
+install_opencode() {
+  echo ""
+  echo -e "${BOLD}OpenCode${NC} (~/.config/opencode)"
+
+  local OC_DIR="$HOME/.config/opencode"
+  mkdir -p "$OC_DIR/command" "$OC_DIR/agent"
+
+  do_cp "$REPO_DIR/opencode/opencode.json" "$OC_DIR/opencode.json"
+
+  # Commands — same priority order, deduplicated by name (last wins = personal)
+  declare -A seen_cmds
+  local -a all_cmd_sources=()
+
+  for vendor in mintuz citypaul; do
+    local src="$VENDOR_DIR/$vendor/commands"
+    [[ -d "$src" ]] && all_cmd_sources+=("$src"/*.md)
+  done
+  for cmd in "$PERSONAL_DIR/commands"/*.md; do
+    [[ -f "$cmd" ]] && all_cmd_sources+=("$cmd")
+  done
+
+  for cmd in "${all_cmd_sources[@]}"; do
+    [[ -f "$cmd" ]] || continue
+    local name
+    name=$(basename "$cmd")
+    if [[ "$DRY_RUN" == "true" ]]; then
+      dry "strip + copy $name → ~/.config/opencode/command/$name"
+    else
+      strip_claude_frontmatter "$cmd" > "$OC_DIR/command/$name"
+      ok "~/.config/opencode/command/$name"
+    fi
+  done
+
+  # Agents
+  for vendor in mintuz citypaul; do
+    local src="$VENDOR_DIR/$vendor/agents"
+    [[ -d "$src" ]] || continue
+    for agent in "$src"/*.md; do
+      [[ -f "$agent" ]] || continue
+      local name
+      name=$(basename "$agent")
+      if [[ "$DRY_RUN" == "true" ]]; then
+        dry "strip + copy $name → ~/.config/opencode/agent/$name"
+      else
+        strip_claude_frontmatter "$agent" > "$OC_DIR/agent/$name"
+        ok "~/.config/opencode/agent/$name"
+      fi
+    done
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+echo -e "${BOLD}agentic-setup install${NC}"
+[[ "$DRY_RUN" == "true" ]] && echo "(dry run)"
+
+check_vendor
+
+[[ "$DO_CLAUDE"   == "true" ]] && install_claude
+[[ "$DO_OPENCODE" == "true" ]] && install_opencode
+
+echo ""
+echo -e "${BOLD}Done.${NC}"

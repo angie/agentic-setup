@@ -1,0 +1,44 @@
+# agentic-setup manifest
+#
+# Upstreams are fetched into vendor/ by `scripts/sync` — never committed.
+# Personal files live in personal/ — always committed, never overwritten by sync.
+# The install script is additive: it only writes what is declared here.
+# Anything else in ~/.claude is untouched.
+
+version: "1"
+
+# ---------------------------------------------------------------------------
+# Upstreams
+# ---------------------------------------------------------------------------
+upstreams:
+  citypaul:
+    repo: citypaul/.dotfiles
+    branch: main
+    path: claude/.claude          # CLAUDE.md + skills/ + commands/ + agents/ live here
+    # Primary base. ~/.claude/CLAUDE.md is assembled as:
+    #   vendor/citypaul/CLAUDE.md + personal/overrides.md
+
+  mintuz:
+    repo: mintuz/claude-plugins
+    branch: main
+    # Secondary. Skills/commands/agents drawn from all plugin categories,
+    # flattened into vendor/mintuz/{skills,commands,agents}/.
+    # citypaul wins on name collisions (installed after mintuz).
+    opt-out:
+      skills:
+        - gps-method
+
+# ---------------------------------------------------------------------------
+# Personal layer
+# Committed here. Applied after all upstreams — always wins on collision.
+# ---------------------------------------------------------------------------
+personal:
+  commands:
+    - attack.md
+    - debate.md
+    - fixissue.md
+    - handoff.md
+    - judge.md
+    - parallel-feature.md
+    - pickup.md
+    - setup-parallel-workflows.md

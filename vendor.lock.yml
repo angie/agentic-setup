@@ -1,0 +1,15 @@
+# vendor.lock.yml — auto-managed by scripts/sync
+# Tracks the upstream commit hashes last fetched into vendor/.
+# Commit this file. Do not edit manually.
+
+citypaul:
+  repo: citypaul/.dotfiles
+  branch: main
+  last_synced: 2026-03-15T10:25:33Z
+  commit: ea35242
+
+mintuz:
+  repo: mintuz/claude-plugins
+  branch: main
+  last_synced: 2026-03-15T10:37:09Z
+  commit: 280c015

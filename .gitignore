@@ -1,0 +1,6 @@
+# Vendor content is fetched by scripts/sync, never committed
+vendor/*
+!vendor/.keep
+
+# macOS
+.DS_Store

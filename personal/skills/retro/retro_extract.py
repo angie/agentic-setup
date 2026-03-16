@@ -646,7 +646,23 @@ def format_session_list(sessions: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _print_preamble() -> None:
+    """Emit a self-identification line so the model always knows the script's
+    canonical path and which backends are live — without needing it hardcoded
+    anywhere in SKILL.md."""
+    script = Path(__file__).resolve()
+    backends = []
+    if _opencode_available():
+        backends.append(f"opencode({_opencode_db_path()})")
+    for root in _jsonl_roots():
+        backends.append(f"jsonl({root})")
+    backend_str = ", ".join(backends) if backends else "none"
+    print(f"<!-- retro_extract: {script} | backends: {backend_str} -->")
+
+
 def main() -> None:
+    _print_preamble()
+
     if not _opencode_available() and not _jsonl_available():
         print(
             "No session data found. Expected one of:\n"

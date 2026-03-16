@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+# scripts/diff
+#
+# Compares installed ~/.claude/ files against their vendor sources, and
+# optionally against project-local .claude/ overrides.
+#
+# Two comparison layers:
+#   Layer 1 (default):   vendor → installed     detects upstream drift after sync
+#   Layer 2 (--project): installed → project    detects override drift in a project
+#
+# Usage:
+#   scripts/diff                                    # all files, diffs only
+#   scripts/diff --source citypaul                  # filter by upstream source
+#   scripts/diff --agent pr-reviewer                # specific agent
+#   scripts/diff --skill tdd                        # specific skill
+#   scripts/diff --command fixissue                 # specific command
+#   scripts/diff --project ~/projects/work/eurostar # also check project overrides
+#   scripts/diff --agent pr-reviewer \
+#                --project ~/projects/work/eurostar  # combined
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+VENDOR_DIR="$REPO_DIR/vendor"
+CLAUDE_DIR="$HOME/.claude"
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+ONLY_SOURCE=""
+FILTER_TYPE=""
+FILTER_NAME=""
+PROJECT_DIR=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --source)    ONLY_SOURCE="$2";                          shift 2 ;;
+    --source=*)  ONLY_SOURCE="${1#*=}";                     shift   ;;
+    --agent)     FILTER_TYPE="agents";   FILTER_NAME="$2"; shift 2 ;;
+    --agent=*)   FILTER_TYPE="agents";   FILTER_NAME="${1#*=}"; shift ;;
+    --skill)     FILTER_TYPE="skills";   FILTER_NAME="$2"; shift 2 ;;
+    --skill=*)   FILTER_TYPE="skills";   FILTER_NAME="${1#*=}"; shift ;;
+    --command)   FILTER_TYPE="commands"; FILTER_NAME="$2"; shift 2 ;;
+    --command=*) FILTER_TYPE="commands"; FILTER_NAME="${1#*=}"; shift ;;
+    --project)   PROJECT_DIR="$2";                          shift 2 ;;
+    --project=*) PROJECT_DIR="${1#*=}";                     shift   ;;
+    -h|--help)
+      grep '^#' "$0" | sed -n '/^# Usage/,/^[^#]/p' | grep '^#' | sed 's/^# \?//'
+      exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+PROJECT_DIR="${PROJECT_DIR%/}"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+ok()     { echo -e "  ${GREEN}✓${NC} $1"; }
+warn()   { echo -e "  ${YELLOW}↑${NC} $1"; }
+info()   { echo -e "  ${BLUE}·${NC} $1"; }
+header() { echo -e "\n${BOLD}$1${NC}"; }
+
+# Colourised diff for a single file pair
+diff_file() {
+  local a="$1" b="$2"
+  if command -v git &>/dev/null; then
+    git diff --no-index -- "$a" "$b" 2>/dev/null || true
+  else
+    diff -u "$a" "$b" 2>/dev/null || true
+  fi
+}
+
+# Summary diff for directories — just lists which files differ, not content
+diff_dir_summary() {
+  local a="$1" b="$2"
+  diff -rq --exclude=".DS_Store" "$a" "$b" 2>/dev/null || true
+}
+
+# Full content diff for directories
+diff_dir_full() {
+  local a="$1" b="$2"
+  if command -v git &>/dev/null; then
+    git diff --no-index -- "$a" "$b" 2>/dev/null || true
+  else
+    diff -r -u "$a" "$b" 2>/dev/null || true
+  fi
+}
+
+print_diff() {
+  local label="$1"
+  local from="$2"
+  local to="$3"
+  local diff_out="$4"
+  local lines
+  lines=$(echo "$diff_out" | wc -l | tr -d ' ')
+
+  echo ""
+  echo -e "  ${YELLOW}↑${NC} ${BOLD}${label}${NC}"
+  echo -e "  ${DIM}< ${from}${NC}"
+  echo -e "  ${DIM}> ${to}${NC}"
+  echo "$diff_out" | head -80
+  [[ "$lines" -gt 80 ]] && echo -e "  ${DIM}... ${lines} lines total${NC}"
+}
+
+# ---------------------------------------------------------------------------
+# Find which vendor source owns a given name
+# Returns the source name (e.g. "citypaul") or empty string
+# ---------------------------------------------------------------------------
+
+find_vendor_source() {
+  local type="$1"   # agents | skills | commands
+  local name="$2"   # pr-reviewer.md  OR  tdd (skill dir name)
+
+  local -a sources=(citypaul mintuz damacus)
+  for source in "${sources[@]}"; do
+    local candidate="$VENDOR_DIR/$source/$type/$name"
+    if [[ -f "$candidate" || -d "$candidate" ]]; then
+      echo "$source"
+      return
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Compare a single agent or command (file-based)
+# ---------------------------------------------------------------------------
+
+compare_file() {
+  local type="$1"       # agents | commands
+  local filename="$2"   # e.g. pr-reviewer.md
+  local label="${type%s}:${filename%.md}"
+
+  local source
+  source=$(find_vendor_source "$type" "$filename")
+
+  # Apply --source filter: skip files owned by a different source
+  if [[ -n "$ONLY_SOURCE" && "$source" != "$ONLY_SOURCE" ]]; then
+    return
+  fi
+
+  local installed="$CLAUDE_DIR/$type/$filename"
+
+  # --- Layer 1: vendor → installed ---
+  if [[ -z "$source" ]]; then
+    [[ -n "$FILTER_NAME" ]] && info "$label — personal-only (no vendor source)"
+  elif [[ ! -f "$installed" ]]; then
+    warn "$label — vendored by ${source} but not installed (run scripts/install)"
+  else
+    local vendor_file="$VENDOR_DIR/$source/$type/$filename"
+    local diff1
+    diff1=$(diff_file "$vendor_file" "$installed")
+
+    if [[ -z "$diff1" ]]; then
+      [[ -n "$FILTER_NAME" ]] && ok "$label — vendor/${source} matches installed"
+    else
+      print_diff "$label" \
+        "vendor/${source}/${type}/${filename}" \
+        "~/.claude/${type}/${filename}" \
+        "$diff1"
+    fi
+  fi
+
+  # --- Layer 2: installed → project override ---
+  if [[ -n "$PROJECT_DIR" ]]; then
+    local project_file="$PROJECT_DIR/.claude/$type/$filename"
+
+    if [[ -f "$project_file" ]]; then
+      local diff2
+      diff2=$(diff_file "$installed" "$project_file")
+
+      if [[ -z "$diff2" ]]; then
+        [[ -n "$FILTER_NAME" ]] && ok "$label [project] — matches installed"
+      else
+        print_diff "$label [project override]" \
+          "~/.claude/${type}/${filename}" \
+          "${PROJECT_DIR}/.claude/${type}/${filename}" \
+          "$diff2"
+      fi
+    elif [[ -n "$FILTER_NAME" ]]; then
+      info "$label — no project override in ${PROJECT_DIR}"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Compare a single skill (directory-based)
+# ---------------------------------------------------------------------------
+
+compare_skill() {
+  local name="$1"
+  local label="skill:${name}"
+
+  local source
+  source=$(find_vendor_source "skills" "$name")
+
+  if [[ -n "$ONLY_SOURCE" && "$source" != "$ONLY_SOURCE" ]]; then
+    return
+  fi
+
+  local installed="$CLAUDE_DIR/skills/$name"
+
+  # --- Layer 1: vendor → installed ---
+  if [[ -z "$source" ]]; then
+    [[ -n "$FILTER_NAME" ]] && info "$label — personal-only (no vendor source)"
+  elif [[ ! -d "$installed" ]]; then
+    warn "$label — vendored by ${source} but not installed (run scripts/install)"
+  else
+    local vendor_dir="$VENDOR_DIR/$source/skills/$name"
+
+    if [[ -n "$FILTER_NAME" ]]; then
+      # Specific mode: show full content diff
+      local diff1
+      diff1=$(diff_dir_full "$vendor_dir" "$installed")
+
+      if [[ -z "$diff1" ]]; then
+        ok "$label — vendor/${source} matches installed"
+      else
+        print_diff "$label" \
+          "vendor/${source}/skills/${name}/" \
+          "~/.claude/skills/${name}/" \
+          "$diff1"
+      fi
+    else
+      # Scan mode: summary only (which files differ)
+      local summary
+      summary=$(diff_dir_summary "$vendor_dir" "$installed")
+
+      if [[ -n "$summary" ]]; then
+        echo ""
+        echo -e "  ${YELLOW}↑${NC} ${BOLD}${label}${NC}  ${DIM}(vendor/${source} vs installed)${NC}"
+        echo "$summary" | sed 's/^/    /'
+      fi
+    fi
+  fi
+
+  # --- Layer 2: installed → project override ---
+  if [[ -n "$PROJECT_DIR" ]]; then
+    local project_skill="$PROJECT_DIR/.claude/skills/$name"
+
+    if [[ -d "$project_skill" ]]; then
+      if [[ -n "$FILTER_NAME" ]]; then
+        local diff2
+        diff2=$(diff_dir_full "$installed" "$project_skill")
+
+        if [[ -z "$diff2" ]]; then
+          ok "$label [project] — matches installed"
+        else
+          print_diff "$label [project override]" \
+            "~/.claude/skills/${name}/" \
+            "${PROJECT_DIR}/.claude/skills/${name}/" \
+            "$diff2"
+        fi
+      else
+        local summary2
+        summary2=$(diff_dir_summary "$installed" "$project_skill")
+
+        if [[ -n "$summary2" ]]; then
+          echo ""
+          echo -e "  ${YELLOW}↑${NC} ${BOLD}${label} [project override]${NC}  ${DIM}(installed vs ${PROJECT_DIR})${NC}"
+          echo "$summary2" | sed 's/^/    /'
+        fi
+      fi
+    elif [[ -n "$FILTER_NAME" ]]; then
+      info "$label — no project skill override in ${PROJECT_DIR}"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+echo -e "${BOLD}agentic-setup diff${NC}"
+[[ -n "$ONLY_SOURCE" ]] && echo -e "  ${DIM}source: ${ONLY_SOURCE}${NC}"
+[[ -n "$PROJECT_DIR" ]] && echo -e "  ${DIM}project: ${PROJECT_DIR}${NC}"
+
+# Specific file requested
+if [[ -n "$FILTER_NAME" ]]; then
+  if [[ "$FILTER_TYPE" == "skills" ]]; then
+    compare_skill "$FILTER_NAME"
+  else
+    name="$FILTER_NAME"
+    [[ "$name" != *.md ]] && name="${name}.md"
+    compare_file "$FILTER_TYPE" "$name"
+  fi
+  echo ""
+  exit 0
+fi
+
+# Full scan mode
+header "Agents"
+if [[ -d "$CLAUDE_DIR/agents" ]]; then
+  for f in "$CLAUDE_DIR/agents"/*.md; do
+    [[ -f "$f" ]] || continue
+    compare_file "agents" "$(basename "$f")"
+  done
+fi
+
+header "Commands"
+if [[ -d "$CLAUDE_DIR/commands" ]]; then
+  for f in "$CLAUDE_DIR/commands"/*.md; do
+    [[ -f "$f" ]] || continue
+    compare_file "commands" "$(basename "$f")"
+  done
+fi
+
+header "Skills"
+if [[ -d "$CLAUDE_DIR/skills" ]]; then
+  for d in "$CLAUDE_DIR/skills"/*/; do
+    [[ -d "$d" ]] || continue
+    compare_skill "$(basename "$d")"
+  done
+fi
+
+echo ""
+echo -e "${DIM}Clean files suppressed. Use --agent/--skill/--command NAME for a full diff.${NC}"
+echo ""

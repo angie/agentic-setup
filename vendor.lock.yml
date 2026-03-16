@@ -13,3 +13,9 @@ mintuz:
   branch: main
   last_synced: 2026-03-15T10:37:09Z
   commit: 280c015
+
+damacus:
+  repo: damacus/agent-skills
+  branch: main
+  last_synced: null
+  commit: null

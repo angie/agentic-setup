@@ -140,14 +140,20 @@ install_claude() {
   # settings.json — personal only
   do_cp "$PERSONAL_DIR/settings.json" "$CLAUDE_DIR/settings.json"
 
-  # Skills — mintuz first (lower priority), citypaul second, personal last (wins)
+  # Skills — mintuz < damacus < citypaul < personal (last writer wins)
   install_vendor_skills   "mintuz"
+  install_vendor_skills   "damacus"
   install_vendor_skills   "citypaul"
+  # Personal skills: overlay individual files so a single-file override (e.g.
+  # retro_extract.py) lands on top of the vendor skill dir without wiping SKILL.md.
   for skill_dir in "$PERSONAL_DIR/skills"/*/; do
     [[ -d "$skill_dir" ]] || continue
-    local name
-    name=$(basename "$skill_dir")
-    do_cp "$skill_dir" "$CLAUDE_DIR/skills/$name"
+    local skill_name
+    skill_name=$(basename "$skill_dir")
+    for file in "$skill_dir"*; do
+      [[ -f "$file" ]] || continue
+      do_cp "$file" "$CLAUDE_DIR/skills/$skill_name/$(basename "$file")"
+    done
   done
 
   # Commands — mintuz first, citypaul second, personal last (wins)

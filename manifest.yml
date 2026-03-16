@@ -28,6 +28,15 @@ upstreams:
       skills:
         - gps-method
 
+  damacus:
+    repo: damacus/agent-skills
+    branch: main
+    # Skills live at the repo root: <skill-name>/SKILL.md
+    # Opt-in only — list every skill explicitly.
+    opt-in:
+      skills:
+        - retro
+
 # ---------------------------------------------------------------------------
 # Personal layer
 # Committed here. Applied after all upstreams — always wins on collision.

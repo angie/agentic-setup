@@ -5,8 +5,8 @@
 citypaul:
   repo: citypaul/.dotfiles
   branch: main
-  last_synced: 2026-03-15T10:25:33Z
-  commit: ea35242
+  last_synced: 2026-03-20T10:32:07Z
+  commit: 5cf7c5b
 
 mintuz:
   repo: mintuz/claude-plugins

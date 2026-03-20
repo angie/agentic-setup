@@ -409,5 +409,11 @@ if [[ -z "$ONLY_SOURCE" || "$ONLY_SOURCE" == "citypaul" ]]; then sync_citypaul; 
 if [[ -z "$ONLY_SOURCE" || "$ONLY_SOURCE" == "mintuz" ]];   then sync_mintuz;   fi
 if [[ -z "$ONLY_SOURCE" || "$ONLY_SOURCE" == "damacus" ]];  then sync_damacus;  fi
 
+if [[ "$DRY_RUN" != "true" ]]; then
+  log ""
+  log "${BOLD}Updating credits…${NC}"
+  "$SCRIPT_DIR/update-credits"
+fi
+
 log ""
 log "${BOLD}Done.${NC} Run ${BLUE}scripts/install${NC} to deploy to ~/.claude"

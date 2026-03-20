@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# scripts/update-credits
+#
+# Reads upstreams from manifest.yml and rewrites the ### Credits section
+# in README.md between the <!-- credits-start --> and <!-- credits-end --> markers.
+#
+# Called automatically by scripts/sync. Safe to run standalone.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+MANIFEST="$REPO_DIR/manifest.yml"
+README="$REPO_DIR/README.md"
+
+# ---------------------------------------------------------------------------
+# Generate credit lines from manifest.yml upstreams
+# ---------------------------------------------------------------------------
+
+credits=$(python3 - "$MANIFEST" <<'PYEOF'
+import sys, re
+
+with open(sys.argv[1]) as f:
+    content = f.read()
+
+# Isolate the upstreams: section (everything until next top-level key or EOF)
+upstreams_match = re.search(r'^upstreams:\s*\n(.+?)(?=^\S|\Z)', content, re.MULTILINE | re.DOTALL)
+if not upstreams_match:
+    sys.exit(0)
+
+section = upstreams_match.group(1)
+
+# Walk line-by-line to collect name / repo / description per upstream
+results = []
+current = {}
+
+for line in section.split('\n'):
+    # Upstream name: exactly 2-space indented key with no value
+    m = re.match(r'^  (\w+):\s*$', line)
+    if m:
+        if current.get('repo'):
+            results.append(current)
+        current = {'name': m.group(1)}
+        continue
+
+    # repo field (4-space indented)
+    m = re.match(r'^    repo:\s+(\S+)', line)
+    if m:
+        current['repo'] = m.group(1)
+        continue
+
+    # description field (4-space indented, optional quotes)
+    m = re.match(r'^    description:\s+["\']?(.+?)["\']?\s*$', line)
+    if m:
+        current['desc'] = m.group(1).strip('\'"')
+        continue
+
+if current.get('repo'):
+    results.append(current)
+
+for item in results:
+    repo = item['repo']
+    desc = item.get('desc', '')
+    url  = f'https://github.com/{repo}'
+    if desc:
+        print(f'- **[{repo}]({url})** — {desc}')
+    else:
+        print(f'- **[{repo}]({url})**')
+PYEOF
+)
+
+# ---------------------------------------------------------------------------
+# Splice credits into README.md between the HTML markers
+# ---------------------------------------------------------------------------
+
+python3 - "$README" "$credits" <<'PYEOF'
+import sys, re
+
+readme_path  = sys.argv[1]
+new_credits  = sys.argv[2]
+
+with open(readme_path) as f:
+    content = f.read()
+
+pattern = r'(<!-- credits-start -->).*?(<!-- credits-end -->)'
+replacement = rf'\1\n{new_credits}\n\2'
+
+updated, n = re.subn(pattern, replacement, content, flags=re.DOTALL)
+
+if n == 0:
+    print("  warning: credits markers not found in README.md", file=sys.stderr)
+    sys.exit(1)
+
+with open(readme_path, 'w') as f:
+    f.write(updated)
+PYEOF
+
+echo "  credits updated in README.md"

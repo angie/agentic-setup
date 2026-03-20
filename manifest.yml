@@ -13,6 +13,7 @@ version: "1"
 upstreams:
   citypaul:
     repo: citypaul/.dotfiles
+    description: "primary upstream — CLAUDE.md, skills, commands, agents"
     branch: main
     path: claude/.claude          # CLAUDE.md + skills/ + commands/ + agents/ live here
     # Primary base. ~/.claude/CLAUDE.md is assembled as:
@@ -20,6 +21,7 @@ upstreams:
 
   mintuz:
     repo: mintuz/claude-plugins
+    description: "secondary upstream — skills, commands, agents"
     branch: main
     # Secondary. Skills/commands/agents drawn from all plugin categories,
     # flattened into vendor/mintuz/{skills,commands,agents}/.
@@ -30,6 +32,7 @@ upstreams:
 
   damacus:
     repo: damacus/agent-skills
+    description: "skills (opt-in: retro)"
     branch: main
     # Skills live at the repo root: <skill-name>/SKILL.md
     # Opt-in only — list every skill explicitly.
